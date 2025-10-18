@@ -20,18 +20,41 @@ characters Character[]
 
 model Character {
 id Int @id @default(autoincrement())
-user User @relation(fields: [userId], references: [id])
+user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 userId Int
-name String
-class String
+
+// Stats básicas
+name String?
 level Int @default(1)
 xp Int @default(0)
+hp Int @default(100)
+maxHp Int @default(100)
+
+// Posição no mapa
+x Float @default(400.0)
+y Float @default(300.0)
+z Float @default(0.0)
+mapId String @default("main_map")
+
+// Stats de combate
+attackPower Int @default(10)
+defense Int @default(5)
+attackRange Float @default(50.0)
+attackSpeed Float @default(1.0) // ataques por segundo
+
+// Legacy fields (manter compatibilidade)
+class String @default("warrior")
 posX Float @default(0)
 posY Float @default(0)
 posZ Float @default(0)
-mapId String @default("main")
 inventory Json? @default("[]")
+
+// Timestamps
 createdAt DateTime @default(now())
+updatedAt DateTime @updatedAt
+lastLogin DateTime @default(now())
+
+@@index([userId])
 }
 
 
@@ -51,4 +74,21 @@ description String
 rewardXp Int @default(0)
 rewardItem Int? // FK to Item.id (optional)
 hidden Boolean @default(false)
+}
+
+model MobTemplate {
+id Int @id @default(autoincrement())
+type String @unique // "slime", "goblin", "dragon", etc
+name String
+level Int @default(1)
+hp Int
+attackPower Int
+defense Int
+xpReward Int // XP que dá ao morrer
+
+// Configurações de spawn
+spawnRate Float @default(1.0) // Chance relativa de spawn
+
+createdAt DateTime @default(now())
+updatedAt DateTime @updatedAt
 }
