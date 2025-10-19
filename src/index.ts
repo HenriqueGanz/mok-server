@@ -5,6 +5,7 @@ import { WebSocketTransport } from "@colyseus/ws-transport";
 import dotenv from "dotenv";
 import { MainMapRoom } from "./rooms/MainMapRoom";
 import { authRouter } from "./auth/auth";
+import charactersRouter from "./routes/characters";
 import { PrismaClient } from "@prisma/client";
 import cors from "cors";
 import jwt from "jsonwebtoken";
@@ -38,6 +39,7 @@ app.use(
 
 app.use(express.json());
 app.use("/auth", authRouter(prisma));
+app.use("/characters", charactersRouter);
 
 const httpServer = http.createServer(app);
 

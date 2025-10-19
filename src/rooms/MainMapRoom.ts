@@ -1,34 +1,39 @@
 import { Room, Client } from "colyseus";
-import { User, PrismaClient, MobTemplate } from "@prisma/client"; // Importar tipos do Prisma
+import { User, PrismaClient, MobTemplate, Character } from "@prisma/client";
 import jwt from "jsonwebtoken";
+import { CLASS_CONFIGS } from "../routes/characters";
+import { GameRoomState, PlayerState, MobState } from "../schema/GameRoomState";
 
-// Constantes do Sistema de Biomas
-const ZONE_WIDTH = 24;  // 1200 pixels / 50 scale = 24 unidades do servidor
-const ZONE_HEIGHT = 16; // 800 pixels / 50 scale = 16 unidades do servidor
+// Constantes do Sistema de Biomas (9 Zonas)
+const ZONE_WIDTH = 24;  // 1200 pixels / 50 scale
+const ZONE_HEIGHT = 16; // 800 pixels / 50 scale
 
 const MAP_BOUNDS = {
-  minX: -24,  // Zona -1 (Neve)
-  maxX: 48,   // Zona 1 (Deserto) = 24 + 24
-  minZ: -16,  // Zona -1 (Pântano)
-  maxZ: 32    // Zona 1 (Vulcão) = 16 + 16
+  minX: -ZONE_WIDTH * 1.5,  // -36 (zona -1)
+  maxX: ZONE_WIDTH * 1.5,   //  36 (zona 1)
+  minZ: -ZONE_HEIGHT * 1.5, // -24 (zona -1)
+  maxZ: ZONE_HEIGHT * 1.5   //  24 (zona 1)
 };
 
-// Determinar bioma baseado nas coordenadas
+// Mapeamento zona -> tipo de mob
+const BIOME_MOBS: Record<string, string> = {
+  "0,0": "slime",           // Floresta (centro)
+  "1,0": "desert_slime",    // Deserto
+  "0,-1": "swamp_slime",    // Pântano
+  "-1,0": "ice_slime",      // Neve
+  "0,1": "fire_slime",      // Vulcão
+  "1,-1": "rock_golem",     // Montanhas
+  "-1,-1": "frost_wolf",    // Tundra
+  "-1,1": "shadow_bat",     // Caverna
+  "1,1": "crab",            // Praia
+};
+
 function getBiomeAt(x: number, z: number): string {
   const zoneX = Math.floor(x / ZONE_WIDTH);
   const zoneY = Math.floor(z / ZONE_HEIGHT);
-
-  // Determinar bioma baseado na zona
-  if (zoneX === 0 && zoneY === 0) return "forest";
-  if (zoneX === 1 && zoneY === 0) return "desert";
-  if (zoneX === 0 && zoneY === -1) return "swamp";
-  if (zoneX === -1 && zoneY === 0) return "snow";
-  if (zoneX === 0 && zoneY === 1) return "volcano";
-
-  return "forest"; // Padrão
+  return BIOME_MOBS[`${zoneX},${zoneY}`] || "slime";
 }
 
-// Limitar coordenadas aos limites do mapa
 function clampToMap(x: number, z: number): { x: number, z: number } {
   return {
     x: Math.max(MAP_BOUNDS.minX, Math.min(MAP_BOUNDS.maxX, x)),
@@ -36,149 +41,73 @@ function clampToMap(x: number, z: number): { x: number, z: number } {
   };
 }
 
-interface PlayerState {
-  id: string;
-  userId: number; // Adicionar userId para identificar o usuário autenticado
-  email: string; // Adicionar email para exibir ou usar
-  x: number;
-  y: number;
-  z: number;
-  hp: number;
-  class: string;
-}
-
-interface MobState {
-  id: string;
-  type: string; // IMPORTANTE: tipo do mob para o cliente determinar cor
-  x: number;
-  y: number;
-  z: number;
-  hp: number;
-  maxHp: number;
-  level: number;
-  xpReward: number;
-}
-
-export class MainMapRoom extends Room<any> {
-  // Estado do jogo (poderia ser um State no Colyseus para auto-sincronização)
-  players: Map<string, PlayerState> = new Map();
-  mobs: Map<string, MobState> = new Map();
-  tickInterval?: NodeJS.Timeout;
-
-  // Mapa para controlar sessões únicas: userId -> sessionId
-  userSessions: Map<number, string> = new Map();
-
-  // Templates de mobs carregados do banco
+export class MainMapRoom extends Room<GameRoomState> {
   mobTemplates: Map<string, MobTemplate> = new Map();
   prisma: PrismaClient;
+  userSessions: Map<number, string> = new Map();
+  tickInterval?: NodeJS.Timeout;
 
-  // Implementar onAuth diretamente na classe Room
   async onAuth(client: Client, options: any) {
     console.log("🔐 MainMapRoom.onAuth chamado para client:", client.sessionId);
-    console.log("🔐 Opções recebidas:", options);
 
     const prisma: PrismaClient = (global as any).prisma;
     const JWT_SECRET: string = (global as any).JWT_SECRET;
 
     if (options && typeof options.token === 'string' && options.token) {
-      console.log("🔐 Token recebido:", options.token);
       try {
         const decodedToken: any = jwt.verify(options.token, JWT_SECRET);
-        console.log("✅ Token decodificado:", decodedToken);
-
         const userId = typeof decodedToken.userId === 'string'
           ? parseInt(decodedToken.userId, 10)
           : decodedToken.userId;
-        console.log("🔍 Buscando userId:", userId);
 
         const user = await prisma.user.findUnique({
           where: { id: userId },
         });
 
         if (user) {
-          console.log("✅ Usuário autenticado no Colyseus:", user.email);
-          return user; // Retorna o objeto do usuário que será armazenado em client.auth
+          // Buscar personagem ativo
+          const character = await prisma.character.findFirst({
+            where: { 
+              userId: user.id,
+              isActive: true
+            },
+          });
+
+          if (!character) {
+            throw new Error("Nenhum personagem selecionado. Selecione um personagem antes de entrar no jogo.");
+          }
+
+          console.log(`✅ Usuário autenticado: ${user.email} com personagem ${character.name}`);
+          return { user, character };
         } else {
-          console.log("❌ Usuário não encontrado para o token (ID:", userId, ")");
           throw new Error("Usuário não encontrado.");
         }
       } catch (error: any) {
         console.error("❌ Erro na validação do token JWT:", error.message);
-        if (error.name === 'TokenExpiredError') {
-          throw new Error("Token JWT expirado.");
-        } else if (error.name === 'JsonWebTokenError') {
-          throw new Error("Token JWT inválido.");
-        } else {
-          throw new Error("Erro de autenticação: " + error.message);
-        }
+        throw error;
       }
     } else {
-      console.log("❌ Token ausente ou formato incorreto");
       throw new Error("Autenticação necessária. Token JWT ausente ou inválido.");
     }
   }
 
   async onCreate(options: any) {
-    console.log("🎮 MainMapRoom criada - Sistema de Biomas ativo");
+    console.log("🎮 MainMapRoom criada - Sistema Completo");
 
+    this.setState(new GameRoomState());
     this.prisma = (global as any).prisma;
+    this.setPatchRate(100); // 10 Hz
 
-    // Define taxa de sincronização do estado (10 Hz para evitar conflitos com movimento)
-    this.setPatchRate(100); // 100ms = 10 vezes por segundo
-
-    // Carregar templates de mobs do banco
     await this.loadMobTemplates();
-
-    // Receive messages from client (input)
-    this.onMessage("input", (client: Client, data: any) => {
-      const player = this.players.get(client.sessionId);
-      if (!player) return;
-
-      // Movimento com limites do mapa
-      if (data.vx !== undefined || data.vy !== undefined) {
-        // Cliente envia velocidade em pixels/segundo
-        // Servidor usa escala 1:50 (1 unidade servidor = 50 pixels cliente)
-        // Delta time é assumido como ~16ms (60 FPS)
-        const delta = 0.016; // 1/60 segundos
-
-        // Converter velocidade do cliente (pixels/seg) para servidor (unidades/seg)
-        const serverVx = (data.vx || 0) / 50; // Dividir por worldScale
-        const serverVy = (data.vy || 0) / 50;
-
-        let newX = player.x + serverVx * delta;
-        let newZ = player.z + serverVy * delta;
-
-        console.log(`📥 Input: vx=${data.vx}, vy=${data.vy} | Pos: (${player.x.toFixed(2)}, ${player.z.toFixed(2)}) → (${newX.toFixed(2)}, ${newZ.toFixed(2)})`);
-
-        // Aplicar limites do mapa
-        const clamped = clampToMap(newX, newZ);
-        player.x = clamped.x;
-        player.z = clamped.z;
-      } if (data.action === "attack") {
-        // handle simple attack: damage nearest mob in range
-        for (const mob of this.mobs.values()) {
-          const dx = mob.x - player.x;
-          const dz = mob.z - player.z;
-          const dist2 = dx * dx + dz * dz;
-          if (dist2 < 4) {
-            mob.hp -= 10;
-            if (mob.hp <= 0) {
-              this.mobs.delete(mob.id);
-              this.broadcast("mob_dead", { id: mob.id });
-              // Respawn mob na mesma zona após delay
-              setTimeout(() => this.respawnMob(mob.x, mob.z), 30000);
-            }
-            break;
-          }
-        }
-      }
-    });
-
-    // Spawn mobs distribuídos por bioma
     await this.spawnMobsByBiome();
 
-    // Tick loop
-    this.tickInterval = setInterval(() => this.tick(), 1000 / 12); // 12 Hz
+    // Mensagens do cliente
+    this.onMessage("input", (client: Client, data: any) => {
+      this.handleInput(client, data);
+    });
+
+    // Loop de atualização
+    this.tickInterval = setInterval(() => this.tick(), 100); // 10 Hz
 
     console.log("✅ MainMapRoom inicializada com sucesso");
   }
@@ -188,83 +117,447 @@ export class MainMapRoom extends Room<any> {
     templates.forEach(template => {
       this.mobTemplates.set(template.type, template);
     });
-    console.log(`📦 Carregados ${templates.length} templates de mobs:`,
-      templates.map(t => t.type).join(", "));
+    console.log(`📦 Carregados ${templates.length} templates de mobs`);
   }
 
   async spawnMobsByBiome() {
-    // Floresta (centro) - 10 mobs
-    await this.spawnMobsInZone(0, 0, 10);
+    const zones = [
+      [0, 0, 10],    // Floresta
+      [1, 0, 8],     // Deserto
+      [0, -1, 6],    // Pântano
+      [-1, 0, 5],    // Neve
+      [0, 1, 4],     // Vulcão
+      [1, -1, 4],    // Montanhas
+      [-1, -1, 5],   // Tundra
+      [-1, 1, 4],    // Caverna
+      [1, 1, 6],     // Praia
+    ];
 
-    // Deserto - 8 mobs
-    await this.spawnMobsInZone(1, 0, 8);
+    for (const [zoneX, zoneY, count] of zones) {
+      await this.spawnMobsInZone(zoneX, zoneY, count);
+    }
 
-    // Pântano - 6 mobs
-    await this.spawnMobsInZone(0, -1, 6);
-
-    // Neve - 5 mobs
-    await this.spawnMobsInZone(-1, 0, 5);
-
-    // Vulcão - 4 mobs (mais difícil)
-    await this.spawnMobsInZone(0, 1, 4);
-
-    console.log(`🐛 Total de ${this.mobs.size} mobs spawnados no mapa`);
+    console.log(`🐛 Total de ${this.state.mobs.size} mobs spawnados no mapa`);
   }
 
   async spawnMobsInZone(zoneX: number, zoneY: number, count: number) {
     for (let i = 0; i < count; i++) {
-      // Posição aleatória dentro da zona
       const localX = Math.random() * ZONE_WIDTH;
       const localZ = Math.random() * ZONE_HEIGHT;
-
-      // Converter para coordenadas mundiais
       const worldX = (zoneX * ZONE_WIDTH) + localX;
       const worldZ = (zoneY * ZONE_HEIGHT) + localZ;
-
       await this.spawnMob(worldX, worldZ);
     }
   }
 
   async spawnMob(x: number, z: number) {
-    const biome = getBiomeAt(x, z);
-    const mobId = `mob_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-
-    // Determinar tipo de mob baseado no bioma
-    let mobType = "slime";
-    switch (biome) {
-      case "desert": mobType = "desert_slime"; break;
-      case "swamp": mobType = "swamp_slime"; break;
-      case "snow": mobType = "ice_slime"; break;
-      case "volcano": mobType = "fire_slime"; break;
-      default: mobType = "slime"; break;
-    }
-
-    // Buscar template do banco
+    const mobType = getBiomeAt(x, z);
     const template = this.mobTemplates.get(mobType);
+
     if (!template) {
-      console.warn(`⚠️ Template não encontrado para ${mobType}, usando slime padrão`);
+      console.warn(`⚠️ Template não encontrado para ${mobType}`);
       return;
     }
 
-    const mob: MobState = {
-      id: mobId,
-      type: mobType,
-      x,
-      y: 0,
-      z,
-      hp: template.hp,
-      maxHp: template.hp,
-      level: template.level,
-      xpReward: template.xpReward
-    };
+    const mobId = `mob_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    const mob = new MobState();
+    
+    mob.id = mobId;
+    mob.type = mobType;
+    mob.name = template.name;
+    mob.x = x;
+    mob.y = 0;
+    mob.z = z;
+    mob.hp = template.hp;
+    mob.maxHp = template.hp;
+    mob.level = template.level;
+    mob.attackPower = template.attackPower;
+    mob.defense = template.defense;
+    mob.attackRange = template.attackRange;
+    mob.attackSpeed = template.attackSpeed;
+    mob.moveSpeed = template.moveSpeed;
+    mob.xpReward = template.xpReward;
+    mob.spawnTime = Date.now();
+    mob.lastAttackTime = 0;
 
-    this.mobs.set(mobId, mob);
+    this.state.mobs.set(mobId, mob);
+  }
 
-    console.log(`🐛 Spawned ${mobType} at (${x.toFixed(1)}, ${z.toFixed(1)}) in ${biome}`);
+  async onJoin(client: Client, options: any) {
+    const { user, character } = client.auth as { user: User; character: Character };
+
+    if (!user || !character) {
+      console.error("Usuário ou personagem não autenticado");
+      client.leave();
+      return;
+    }
+
+    // Verificar sessão única
+    const existingSessionId = this.userSessions.get(user.id);
+    if (existingSessionId && existingSessionId !== client.sessionId) {
+      console.log(`⚠️ ${user.email} já está logado. Desconectando sessão anterior...`);
+      const existingClient = Array.from(this.clients).find(c => c.sessionId === existingSessionId);
+      if (existingClient) {
+        existingClient.send("kicked", {
+          reason: "Nova sessão detectada. Você foi desconectado."
+        });
+        setTimeout(() => existingClient.leave(4000), 100);
+      }
+      this.state.players.delete(existingSessionId);
+    }
+
+    this.userSessions.set(user.id, client.sessionId);
+
+    // Criar jogador com stats da classe
+    const classConfig = CLASS_CONFIGS[character.class] || CLASS_CONFIGS.warrior;
+    const player = new PlayerState();
+    
+    player.id = client.sessionId;
+    player.email = user.email;
+    player.class = character.class;
+    player.characterId = character.id;
+    player.x = character.x;
+    player.y = character.y;
+    player.z = character.z;
+    player.hp = character.hp;
+    player.maxHp = character.maxHp;
+    player.xp = character.xp;
+    player.level = character.level;
+    player.attackPower = character.attackPower;
+    player.defense = character.defense;
+    player.attackRange = character.attackRange;
+    player.attackSpeed = character.attackSpeed;
+    player.moveSpeed = character.moveSpeed;
+    player.lastAttackTime = 0;
+
+    this.state.players.set(client.sessionId, player);
+
+    console.log(`👤 ${user.email} (${character.name} - ${character.class}) entrou no jogo`);
+
+    // Notificar outros jogadores
+    this.broadcast("player_joined", {
+      id: client.sessionId,
+      email: user.email,
+      class: character.class,
+      level: character.level,
+    }, { except: client });
+  }
+
+  handleInput(client: Client, data: any) {
+    const player = this.state.players.get(client.sessionId);
+    if (!player) return;
+
+    // Movimento
+    if (data.vx !== undefined || data.vy !== undefined) {
+      const delta = 0.016;
+      const serverVx = (data.vx || 0) / 50;
+      const serverVy = (data.vy || 0) / 50;
+
+      let newX = player.x + serverVx * delta;
+      let newZ = player.z + serverVy * delta;
+
+      const clamped = clampToMap(newX, newZ);
+      player.x = clamped.x;
+      player.z = clamped.z;
+    }
+
+    // Ataque
+    if (data.action === "attack") {
+      const now = Date.now();
+      const attackCooldown = 1000 / player.attackSpeed;
+
+      if (now - player.lastAttackTime >= attackCooldown) {
+        this.playerAttackMob(player);
+        player.lastAttackTime = now;
+      }
+    }
+  }
+
+  playerAttackMob(player: PlayerState) {
+    let closestMob: MobState | null = null;
+    let closestDist = Infinity;
+
+    this.state.mobs.forEach((mob) => {
+      const mobState = mob as MobState;
+      if (mobState.hp <= 0) return;
+      
+      const dx = mobState.x - player.x;
+      const dz = mobState.z - player.z;
+      const dist = Math.sqrt(dx * dx + dz * dz);
+
+      if (dist <= player.attackRange / 50 && dist < closestDist) {
+        closestDist = dist;
+        closestMob = mobState;
+      }
+    });
+
+    if (!closestMob) return;
+
+    const targetMob = closestMob as MobState;
+    const baseDamage = player.attackPower;
+    const damage = Math.max(1, baseDamage - targetMob.defense);
+    targetMob.hp = Math.max(0, targetMob.hp - damage);
+
+    console.log(`⚔️ ${player.email} atacou ${targetMob.name} por ${damage} de dano`);
+
+    if (targetMob.hp <= 0) {
+      this.handleMobDeath(targetMob, player);
+    }
+  }
+
+  async handleMobDeath(mob: MobState, killerPlayer: PlayerState) {
+    console.log(`💀 ${mob.name} morreu!`);
+
+    // XP para o jogador
+    killerPlayer.xp += mob.xpReward;
+
+    this.broadcast("xp_gained", {
+      playerId: killerPlayer.id,
+      amount: mob.xpReward,
+      newXp: killerPlayer.xp,
+      level: killerPlayer.level
+    });
+
+    // Verificar level up
+    await this.checkLevelUp(killerPlayer);
+
+    // Sistema de drops
+    const template = this.mobTemplates.get(mob.type);
+    if (template && template.possibleDrops) {
+      const dropRoll = Math.random();
+      
+      if (dropRoll <= template.dropRate) {
+        await this.dropItem(mob, killerPlayer, template);
+      }
+    }
+
+    // Remover mob
+    this.state.mobs.delete(mob.id);
+    this.broadcast("mob_dead", { id: mob.id });
+
+    // Respawn após 30s
+    setTimeout(() => this.respawnMob(mob.x, mob.z), 30000);
+
+    // Salvar progresso do jogador
+    await this.saveCharacter(killerPlayer);
+  }
+
+  async dropItem(mob: MobState, player: PlayerState, template: MobTemplate) {
+    const possibleDrops = template.possibleDrops as number[];
+    const randomItemId = possibleDrops[Math.floor(Math.random() * possibleDrops.length)];
+
+    const item = await this.prisma.item.findUnique({
+      where: { id: randomItemId }
+    });
+
+    if (item) {
+      const character = await this.prisma.character.findUnique({
+        where: { id: player.characterId }
+      });
+
+      if (character) {
+        const inventory = (character.inventory as any[]) || [];
+        inventory.push({
+          itemId: item.id,
+          name: item.name,
+          type: item.type,
+          rarity: item.rarity,
+          data: item.data,
+          equippedAt: null
+        });
+
+        await this.prisma.character.update({
+          where: { id: player.characterId },
+          data: { inventory: inventory }
+        });
+
+        this.clients.find(c => c.sessionId === player.id)?.send("item_dropped", {
+          item: {
+            id: item.id,
+            name: item.name,
+            type: item.type,
+            rarity: item.rarity,
+            data: item.data
+          },
+          mobId: mob.id,
+          mobType: mob.type
+        });
+
+        console.log(`💎 ${player.email} recebeu ${item.name}!`);
+      }
+    }
+  }
+
+  async checkLevelUp(player: PlayerState) {
+    const xpNeeded = player.level * 100;
+
+    if (player.xp >= xpNeeded) {
+      player.level += 1;
+      player.xp -= xpNeeded;
+
+      const classConfig = CLASS_CONFIGS[player.class] || CLASS_CONFIGS.warrior;
+      player.maxHp += classConfig.hpPerLevel;
+      player.hp = player.maxHp; // Curar completamente
+      player.attackPower += classConfig.attackPerLevel;
+      player.defense += classConfig.defensePerLevel;
+
+      console.log(`⭐ ${player.email} alcançou level ${player.level}!`);
+
+      this.broadcast("player_levelup", {
+        playerId: player.id,
+        playerName: player.email,
+        newLevel: player.level,
+        newStats: {
+          hp: player.hp,
+          maxHp: player.maxHp,
+          attackPower: player.attackPower,
+          defense: player.defense
+        }
+      });
+
+      await this.saveCharacter(player);
+
+      // Verificar múltiplos level ups
+      if (player.xp >= player.level * 100) {
+        await this.checkLevelUp(player);
+      }
+    }
+  }
+
+  async saveCharacter(player: PlayerState) {
+    try {
+      await this.prisma.character.update({
+        where: { id: player.characterId },
+        data: {
+          x: player.x,
+          y: player.y,
+          z: player.z,
+          hp: player.hp,
+          maxHp: player.maxHp,
+          xp: player.xp,
+          level: player.level,
+          attackPower: player.attackPower,
+          defense: player.defense,
+          lastLogin: new Date()
+        }
+      });
+    } catch (error) {
+      console.error(`Erro ao salvar personagem:`, error);
+    }
+  }
+
+  tick() {
+    const now = Date.now();
+
+    // IA dos mobs: atacar jogadores
+    this.state.mobs.forEach((mob: MobState) => {
+      if (mob.hp <= 0) return;
+
+      // Encontrar jogador mais próximo
+      let closestPlayer: PlayerState | null = null;
+      let closestDistance = Infinity;
+
+      this.state.players.forEach((player: PlayerState) => {
+        const dx = player.x - mob.x;
+        const dz = player.z - mob.z;
+        const distance = Math.sqrt(dx * dx + dz * dz);
+
+        if (distance < closestDistance) {
+          closestDistance = distance;
+          closestPlayer = player;
+        }
+      });
+
+      if (!closestPlayer) {
+        // Movimento aleatório se não houver jogador próximo
+        if (now - mob.lastMoveTime > 2000) {
+          mob.x += (Math.random() - 0.5) * 0.5;
+          mob.z += (Math.random() - 0.5) * 0.5;
+          mob.lastMoveTime = now;
+        }
+        return;
+      }
+
+      const attackRangeServer = mob.attackRange / 50;
+
+      // Se jogador está no alcance, atacar
+      if (closestDistance <= attackRangeServer) {
+        const timeSinceLastAttack = now - mob.lastAttackTime;
+        const attackCooldown = 1000 / mob.attackSpeed;
+
+        if (timeSinceLastAttack >= attackCooldown) {
+          this.mobAttackPlayer(mob, closestPlayer);
+          mob.lastAttackTime = now;
+        }
+      }
+      // Se está próximo mas fora do alcance, mover em direção ao jogador
+      else if (closestDistance < 5 && closestPlayer) { // Dentro de 5 unidades
+        const targetPlayer = closestPlayer as PlayerState;
+        const dirX = targetPlayer.x - mob.x;
+        const dirZ = targetPlayer.z - mob.z;
+        const length = Math.sqrt(dirX * dirX + dirZ * dirZ);
+
+        if (length > 0) {
+          const moveAmount = (mob.moveSpeed / 50) * 0.1; // Delta time
+          mob.x += (dirX / length) * moveAmount;
+          mob.z += (dirZ / length) * moveAmount;
+        }
+      }
+      // Movimento aleatório se estiver longe
+      else if (closestDistance > 5) {
+        if (now - mob.lastMoveTime > 2000) {
+          mob.x += (Math.random() - 0.5) * 0.5;
+          mob.z += (Math.random() - 0.5) * 0.5;
+          mob.lastMoveTime = now;
+        }
+      }
+    });
+  }
+
+  mobAttackPlayer(mob: MobState, player: PlayerState) {
+    const baseDamage = mob.attackPower;
+    const damage = Math.max(1, baseDamage - player.defense);
+
+    player.hp = Math.max(0, player.hp - damage);
+
+    console.log(`🔥 ${mob.name} atacou ${player.email} por ${damage} de dano`);
+
+    this.broadcast("player_damaged", {
+      playerId: player.id,
+      damage: damage,
+      newHp: player.hp,
+      maxHp: player.maxHp,
+      attackerId: mob.id
+    });
+
+    if (player.hp <= 0) {
+      this.handlePlayerDeath(player);
+    }
+  }
+
+  async handlePlayerDeath(player: PlayerState) {
+    console.log(`💀 ${player.email} morreu!`);
+
+    this.broadcast("player_died", {
+      playerId: player.id,
+      playerName: player.email
+    });
+
+    // Respawn no centro da floresta
+    player.x = 0;
+    player.z = 0;
+    player.hp = player.maxHp;
+
+    // Penalidade de XP (perder 10%)
+    const xpLoss = Math.floor(player.xp * 0.1);
+    player.xp = Math.max(0, player.xp - xpLoss);
+
+    console.log(`⚰️ ${player.email} respawnou, perdeu ${xpLoss} XP`);
+
+    await this.saveCharacter(player);
   }
 
   async respawnMob(x: number, z: number) {
-    // Respawn mob na mesma zona
     const zoneX = Math.floor(x / ZONE_WIDTH);
     const zoneZ = Math.floor(z / ZONE_HEIGHT);
 
@@ -275,118 +568,30 @@ export class MainMapRoom extends Room<any> {
     const newZ = (zoneZ * ZONE_HEIGHT) + localZ;
 
     await this.spawnMob(newX, newZ);
-    console.log(`🔄 Mob respawnado em (${newX.toFixed(1)}, ${newZ.toFixed(1)})`);
   }
 
-  // onAuth do Colyseus já validou o token e retornou o objeto User
-  // que estará disponível em client.auth
-  async onJoin(client: Client, options: any) {
-    console.log(client.sessionId, "joined MainMapRoom. Auth data:", client.auth);
-
-    const user = client.auth as User; // O tipo User deve vir do Prisma
-
-    if (!user) {
-      console.error("Usuário não autenticado tentando entrar na sala.");
-      client.leave(); // Força o cliente a sair se não estiver autenticado
-      return;
-    }
-
-    // Verificar se o usuário já está logado em outra sessão
-    const existingSessionId = this.userSessions.get(user.id);
-    if (existingSessionId && existingSessionId !== client.sessionId) {
-      console.log(`⚠️ ${user.email} já está logado na sessão ${existingSessionId}. Desconectando sessão anterior...`);
-
-      // Buscar o cliente anterior e forçar desconexão
-      const existingClient = Array.from(this.clients).find(c => c.sessionId === existingSessionId);
-      if (existingClient) {
-        // Enviar mensagem avisando que foi desconectado
-        existingClient.send("kicked", {
-          reason: "Nova sessão detectada. Você foi desconectado porque fez login em outro lugar."
-        });
-
-        // Forçar desconexão após pequeno delay para garantir que a mensagem foi enviada
-        setTimeout(() => {
-          existingClient.leave(4000); // Código 4000 = kicked/duplicated session
-        }, 100);
-      }
-
-      // Remover o jogador anterior do mapa
-      this.players.delete(existingSessionId);
-    }
-
-    // Registrar nova sessão
-    this.userSessions.set(user.id, client.sessionId);
-    console.log(`✅ Sessão registrada para ${user.email}: ${client.sessionId}`);
-
-    // Jogadores sempre spawnam no CENTRO da FLORESTA
-    const newPlayer: PlayerState = {
-      id: client.sessionId,
-      userId: user.id,
-      email: user.email,
-      x: 0, // Centro da floresta
-      y: 0,
-      z: 0, // Centro da floresta
-      hp: 100,
-      class: options.class ?? "warrior",
-    };
-    this.players.set(client.sessionId, newPlayer);
-
-    console.log(`👤 ${user.email} spawnou na Floresta (0, 0)`);
-
-    // Enviar estado inicial para o cliente que acabou de entrar
-    client.send("init", {
-      id: client.sessionId,
-      players: Array.from(this.players.values()),
-      mobs: Array.from(this.mobs.values()),
-    });
-
-    // Avisar os outros clientes que um novo jogador entrou
-    this.broadcast("player_joined", {
-      id: client.sessionId,
-      x: newPlayer.x,
-      y: newPlayer.y,
-      z: newPlayer.z,
-      email: newPlayer.email, // Enviar o email para identificação visual
-    }, { except: client }); // Não enviar para o próprio cliente
-  }
-
-  onLeave(client: Client, consented: boolean) {
-    const player = this.players.get(client.sessionId);
+  async onLeave(client: Client, consented: boolean) {
+    const player = this.state.players.get(client.sessionId);
 
     if (player) {
-      console.log(`👋 ${player.email} (${client.sessionId}) saiu da sala`);
+      console.log(`👋 ${player.email} saiu da sala`);
 
-      // Remover a sessão do usuário apenas se for a sessão atual
-      const currentSessionId = this.userSessions.get(player.userId);
+      // Salvar progresso
+      await this.saveCharacter(player);
+
+      // Remover sessão
+      const currentSessionId = this.userSessions.get(player.characterId);
       if (currentSessionId === client.sessionId) {
-        this.userSessions.delete(player.userId);
-        console.log(`🔓 Sessão liberada para userId: ${player.userId}`);
+        this.userSessions.delete(player.characterId);
       }
 
-      this.players.delete(client.sessionId);
+      this.state.players.delete(client.sessionId);
       this.broadcast("player_left", { id: client.sessionId });
-    } else {
-      console.log(client.sessionId, "left (no player data)");
     }
   }
 
   onDispose() {
-    console.log("Disposing MainMapRoom");
+    console.log("🧹 MainMapRoom disposed");
     if (this.tickInterval) clearInterval(this.tickInterval);
-  }
-
-  tick() {
-    // simple mob AI: move randomly or chase nearest player
-    for (const mob of this.mobs.values()) {
-      // pick a random nearby direction
-      mob.x += (Math.random() - 0.5) * 0.4;
-      mob.z += (Math.random() - 0.5) * 0.4;
-    }
-
-    // broadcast simplified snapshot: list of players and mobs
-    this.broadcast("snapshot", {
-      players: Array.from(this.players.values()),
-      mobs: Array.from(this.mobs.values()),
-    });
   }
 }

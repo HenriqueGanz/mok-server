@@ -4,6 +4,8 @@ import { Schema, type, MapSchema } from "@colyseus/schema";
 export class PlayerState extends Schema {
   @type("string") id: string;
   @type("string") email: string;
+  @type("string") class: string = "warrior";
+  @type("number") characterId: number;
   @type("number") x: number = 400;
   @type("number") y: number = 300;
   @type("number") z: number = 0;
@@ -16,6 +18,8 @@ export class PlayerState extends Schema {
   @type("number") attackPower: number = 10;
   @type("number") defense: number = 5;
   @type("number") attackRange: number = 50;
+  @type("number") attackSpeed: number = 1.0;
+  @type("number") moveSpeed: number = 200;
 
   @type("number") lastAttackTime: number = 0;
 }
@@ -24,6 +28,7 @@ export class PlayerState extends Schema {
 export class MobState extends Schema {
   @type("string") id: string;
   @type("string") type: string = "slime";
+  @type("string") name: string = "Slime";
   @type("number") x: number;
   @type("number") y: number;
   @type("number") z: number = 0;
@@ -33,11 +38,19 @@ export class MobState extends Schema {
   @type("number") level: number = 1;
 
   @type("number") attackPower: number = 5;
+  @type("number") defense: number = 2;
+  @type("number") attackRange: number = 60;
+  @type("number") attackSpeed: number = 0.8;
+  @type("number") moveSpeed: number = 150;
   @type("number") xpReward: number = 10;
 
   @type("boolean") isDead: boolean = false;
   @type("number") spawnTime: number;
   @type("number") lastMoveTime: number = 0;
+  @type("number") lastAttackTime: number = 0;
+  
+  // Campos não sincronizados (apenas servidor)
+  targetPlayerId?: string;
 }
 
 // Main Room State
